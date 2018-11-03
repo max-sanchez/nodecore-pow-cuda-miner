@@ -206,10 +206,7 @@ uint64_t vBlake2(const uint64_t h0, const uint64_t h1, const uint64_t h2, const 
 		
 	vblake512_compress(h, b, c_sigma_big, c_u512);
 	
-	//for (int i = 0; i < 8; i++) {
-		b[7] = cuda_swab64(h[7]);
-	//}
-	return h[7];
+	return h[0];
 }
 
 
@@ -245,8 +242,8 @@ __global__ void vblakeHasher(uint32_t *nonceStart, uint32_t *nonceOut, uint64_t 
 	// Run the hash WORK_PER_THREAD times
 	for (unsigned int nonce = workStart; nonce < workStart + WORK_PER_THREAD; nonce++) {
 		// Zero out nonce position and write new nonce to last 32 bits of prototype header
-		nonceHeaderSection &= 0x00000000FFFFFFFFu;
-		nonceHeaderSection |= (((uint64_t)nonce) << 32);
+		nonceHeaderSection &= 0xFFFFFFFF00000000u;
+		nonceHeaderSection |= (((uint64_t)nonce));
 
 		uint64_t hashStart = vBlake2(headerIn[0], headerIn[1], headerIn[2], headerIn[3], headerIn[4], headerIn[5], headerIn[6], nonceHeaderSection);
 
@@ -258,9 +255,15 @@ __global__ void vblakeHasher(uint32_t *nonceStart, uint32_t *nonceOut, uint64_t 
 			0x00000000FFFFFFFFu // 2^32 difficulty
 #endif
 			) == 0) {
+
 			// Check that found solution is better than existing solution if one has already been found on this run of the kernel (always send back highest-quality work)
 			if (hashStartOut[0] > hashStart || hashStartOut[0] == 0) {
-				nonceOut[0] = nonce;
+				uint32_t flippedNonce = (nonce & 0xFF000000) >> 24 |
+					(nonce & 0x00FF0000) >> 8 |
+					(nonce & 0x0000FF00) << 8 |
+					(nonce & 0x000000FF) << 24;
+
+				nonceOut[0] = flippedNonce;
 				hashStartOut[0] = hashStart;
 			}
 
@@ -884,6 +887,20 @@ uint32_t lastNonceStart = 0;
 // Grind Through vBlake nonces with the provided header, setting the resultant nonce and associated hash start if a high-difficulty solution is found
 cudaError_t grindNonces(uint32_t *nonceResult, uint64_t *hashStart, const uint64_t *header)
 {
+	uint64_t headerFlipped[8];
+	for (int i = 0; i < 8; i++) {
+		uint64_t headerPartFlipped = 0;
+		headerPartFlipped |= (header[i] & 0x00000000000000FF) << 56;
+		headerPartFlipped |= (header[i] & 0x000000000000FF00) << 40;
+		headerPartFlipped |= (header[i] & 0x0000000000FF0000) << 24;
+		headerPartFlipped |= (header[i] & 0x00000000FF000000) << 8;
+		headerPartFlipped |= (header[i] & 0x000000FF00000000) >> 8;
+		headerPartFlipped |= (header[i] & 0x0000FF0000000000) >> 24;
+		headerPartFlipped |= (header[i] & 0x00FF000000000000) >> 40;
+		headerPartFlipped |= (header[i] & 0xFF00000000000000) >> 56;
+		headerFlipped[i] = headerPartFlipped;
+	}
+
 	// Device memory
 	uint32_t *dev_nonceStart = 0;
 	uint64_t *dev_header = 0;
@@ -974,7 +991,7 @@ cudaError_t grindNonces(uint32_t *nonceResult, uint64_t *hashStart, const uint64
 	}
 
 	// Copy input vectors from host memory to GPU buffers.
-	cudaStatus = cudaMemcpy(dev_header, header, 8 * sizeof(uint64_t), cudaMemcpyHostToDevice);
+	cudaStatus = cudaMemcpy(dev_header, headerFlipped, 8 * sizeof(uint64_t), cudaMemcpyHostToDevice);
 	if (cudaStatus != cudaSuccess) {
 		sprintf(outputBuffer, "cudaMalloc failed!");
 		cerr << outputBuffer << endl;
